@@ -1,8 +1,12 @@
 import pymysql
 import bcrypt
-from flask import Flask, render_template, request, jsonify
+import jwt
+from flask import Flask, make_response, render_template, request, jsonify
+from flask_jwt import JWT, jwt_required, current_identity
 from datetime import date
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import wraps
+
 
 class database:
     #coenxion la base de datos
@@ -17,6 +21,41 @@ class database:
         self.cursor = self.connection.cursor()
 
         print("Conexion establecida exitosamente!!!")
+    #funciones tbl_user
+    def select_user(self,id):
+        sql='select user_rol from tbl_users where id={}'.format(id)
+        try:
+            self.cursor.execute(sql)
+            columns = [column[0] for column in self.cursor.description]
+            results = []
+            for row in self.cursor.fetchall():
+                results.append(dict(zip(columns, row)))
+            return results
+
+        except Exception as e:
+            raise
+    def authenticate(self,username):
+        sql="select id,user_password from tbl_users where user_name='{}'".format(username)
+        try:
+            self.cursor.execute(sql)
+            columns = [column[0] for column in self.cursor.description]
+            results = []
+            for row in self.cursor.fetchall():
+                results.append(dict(zip(columns, row)))
+            return results
+
+        except Exception as e:
+            raise
+
+    def insert_user(self, username, password, rol):
+        sql="insert into tbl_users (user_name,user_password,user_rol) values(%s,%s,%s);"
+        try:
+            self.cursor.execute(sql,(username,password,rol))
+            self.connection.commit()
+            user=self.cursor.lastrowid
+            return user
+        except Exception as e:
+            raise
     #funciones para consultas y insert en la tabla 'tbl_ropa'
     def select_ropa(self,id):
 
@@ -178,12 +217,64 @@ class database:
 mydata = database()
 #creo mi objeto de flask
 app = Flask(__name__)
+app.config['SECRET_KEY']='2101d85b8bc14fd39f80c2a1211699f4'
+#creo mi JWT
+def token_require(func):
+    @wraps(func)
+    def decorated(*args, **kwargs):
+        token=request.headers['Authorization']
+        if not token:
+            return jsonify({'Alert!':'Token is missing!'})
+        try:
+            token=token.replace("Bearer ","")
+            payload=jwt.decode(token,app.config['SECRET_KEY'],algorithms=["HS256"])
+            return jsonify(payload)
+        except:
+            return jsonify({'Alert':'Invalid Token'})
+    return decorated
 
 @app.route("/")
 def home():
     #return render_template('index.html')
-    return "<p>puerco</p>"
+    return "<p>Bienbenido</p>"
+#rutas de la tabla users
+@app.route('/auth')
+@token_require
+def auth():
+    return jsonify({'JWT is verified. Welcome to your dashboard!'})
 
+@app.route("/login", methods=['POST'])
+def login_user():
+    name=request.form['username']
+    password=request.form['password'].encode('utf-8')
+    data=mydata.authenticate(name)
+    if data!=[]:
+        hashed=data[0]['user_password']
+        hashed=hashed.encode('utf-8')
+        token='no auth'
+        if bcrypt.checkpw(password,hashed):
+            token=jwt.encode({
+                'user':data[0]['id'],
+                'expiration':str(datetime.utcnow()+timedelta(minutes=120))
+            },
+            app.config['SECRET_KEY'])
+        return jsonify({'token':token})
+    else:
+        return make_response('unable to verify', 403, {'WWW-Authentication':'Basic realm: "Authentication Failed!!"'})
+@app.route("/list_user",methods=['POST'])
+def select_u():
+    id=request.form['id_user']
+    data=mydata.select_user(id)
+    return jsonify(data)
+@app.route("/new_user",methods=['POST'])
+def insert_u():
+    name=request.form['username']
+    password=request.form['password']
+    rol=request.form['user_rol']
+    password=password.encode('utf-8')
+    hashed=bcrypt.hashpw(password,bcrypt.gensalt())
+    data=mydata.insert_user(name,hashed,rol)
+    return jsonify(data)
 #rutas de la tabla ropa
 @app.route("/list")
 def listar():
