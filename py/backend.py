@@ -5,7 +5,6 @@ from flask import Flask, make_response, render_template, request, jsonify
 from flask_jwt import JWT, jwt_required, current_identity
 from datetime import date
 from datetime import datetime, timedelta
-from functools import wraps
 
 
 class database:
@@ -21,6 +20,21 @@ class database:
         self.cursor = self.connection.cursor()
 
         print("Conexion establecida exitosamente!!!")
+
+    #funciones tbl_rol
+
+    def select_rol_all(self):
+        sql='select * from tbl_rol'
+        try:
+            self.cursor.execute(sql)
+            columns = [column[0] for column in self.cursor.description]
+            results = []
+            for row in self.cursor.fetchall():
+                results.append(dict(zip(columns, row)))
+            return results
+        except Exception as e:
+            raise
+
     #funciones tbl_user
     def select_user(self,id):
         sql='select user_rol from tbl_users where id={}'.format(id)
@@ -35,7 +49,7 @@ class database:
         except Exception as e:
             raise
     def authenticate(self,username):
-        sql="select id,user_password from tbl_users where user_name='{}'".format(username)
+        sql="select id,user_password,estado,id_rol from tbl_users where user_name='{}'".format(username)
         try:
             self.cursor.execute(sql)
             columns = [column[0] for column in self.cursor.description]
@@ -48,9 +62,9 @@ class database:
             raise
 
     def insert_user(self, username, password, rol):
-        sql="insert into tbl_users (user_name,user_password,user_rol) values(%s,%s,%s);"
+        sql="insert into tbl_users (user_name,user_password,id_rol,estado) values(%s,%s,%s,%s);"
         try:
-            self.cursor.execute(sql,(username,password,rol))
+            self.cursor.execute(sql,(username,password,rol,True))
             self.connection.commit()
             user=self.cursor.lastrowid
             return user
@@ -59,7 +73,7 @@ class database:
     #funciones para consultas y insert en la tabla 'tbl_ropa'
     def select_ropa(self,id):
 
-        sql= 'select * from tbl_ropa where id={}'.format(id) #hace un select con el id
+        sql= 'select tbl_ropa.id,nombre_ropa,tbl_talla.talla as talla from tbl_ropa inner join tbl_talla on tbl_ropa.id_talla = tbl_talla.id where id={}'.format(id) #hace un select con el id
 
         try:
             self.cursor.execute(sql)
@@ -74,7 +88,7 @@ class database:
     
     def select_ropa_all(self):
 
-        sql= 'select * from tbl_ropa'
+        sql= 'select tbl_ropa.id,nombre_ropa,tbl_talla.talla as talla from tbl_ropa inner join tbl_talla on tbl_ropa.id_talla = tbl_talla.id'
         
         try:
             self.cursor.execute(sql)
@@ -217,31 +231,40 @@ class database:
 mydata = database()
 #creo mi objeto de flask
 app = Flask(__name__)
-app.config['SECRET_KEY']='2101d85b8bc14fd39f80c2a1211699f4'
 #creo mi JWT
-def token_require(func):
-    @wraps(func)
-    def decorated(*args, **kwargs):
-        token=request.headers['Authorization']
-        if not token:
-            return jsonify({'Alert!':'Token is missing!'})
-        try:
-            token=token.replace("Bearer ","")
-            payload=jwt.decode(token,app.config['SECRET_KEY'],algorithms=["HS256"])
-            return jsonify(payload)
-        except:
-            return jsonify({'Alert':'Invalid Token'})
-    return decorated
+app.config['SECRET_KEY']='2101d85b8bc14fd39f80c2a1211699f4'
 
 @app.route("/")
 def home():
     #return render_template('index.html')
     return "<p>Bienbenido</p>"
+
+def auth_in():
+    token=request.headers['Authorization']
+    if not token:
+        return False
+    try:
+        token=token.replace("Bearer ","")
+        payload=jwt.decode(token,app.config['SECRET_KEY'],algorithms=["HS256"])
+        if datetime.strptime(payload['expiration'], '%Y-%m-%d %H:%M:%S.%f')<datetime.now():
+            return False
+        else:
+            return True
+    except:
+        return jsonify({'Alert':'Invalid Token'})
+
 #rutas de la tabla users
-@app.route('/auth')
-@token_require
+@app.route('/auth', methods=['POST'])
 def auth():
-    return jsonify({'JWT is verified. Welcome to your dashboard!'})
+    token=request.headers['Authorization']
+    if not token:
+        return jsonify({'Alert!':'Token is missing!'})
+    try:
+        token=token.replace("Bearer ","")
+        payload=jwt.decode(token,app.config['SECRET_KEY'],algorithms=["HS256"])
+        return jsonify(payload)
+    except:
+        return jsonify({'Alert':'Invalid Token'})
 
 @app.route("/login", methods=['POST'])
 def login_user():
@@ -252,15 +275,19 @@ def login_user():
         hashed=data[0]['user_password']
         hashed=hashed.encode('utf-8')
         token='no auth'
-        if bcrypt.checkpw(password,hashed):
+        if bcrypt.checkpw(password,hashed) and data[0]['estado']==True:
             token=jwt.encode({
                 'user':data[0]['id'],
-                'expiration':str(datetime.utcnow()+timedelta(minutes=120))
+                'rol':data[0]['id_rol'],
+                'expiration':str(datetime.now()+timedelta(minutes=120))
             },
             app.config['SECRET_KEY'])
+        else:
+            token='Basic realm: "Authentication Failed!!"'
         return jsonify({'token':token})
     else:
         return make_response('unable to verify', 403, {'WWW-Authentication':'Basic realm: "Authentication Failed!!"'})
+
 @app.route("/list_user",methods=['POST'])
 def select_u():
     id=request.form['id_user']
@@ -278,22 +305,31 @@ def insert_u():
 #rutas de la tabla ropa
 @app.route("/list")
 def listar():
-    data=mydata.select_ropa_all()
-    return jsonify(data)
+    a=auth_in()
+    if a==True:
+        data=mydata.select_ropa_all()
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
 
 @app.route("/newropa", methods=['POST'])
 def insert():
-    name=request.form['nombre']
-    cant=request.form['cantidad']
+    a=auth_in()
+    if a==True:
+        name=request.form['nombre']
+        cant=request.form['cantidad']
 
-    data=mydata.insert_ropa(name,cant)
-    
-    data=mydata.select_ropa(data)
+        data=mydata.insert_ropa(name,cant)
+        
+        data=mydata.select_ropa(data)
 
-    return jsonify(data)
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
 
 @app.route("/update_ropa", methods=['PUT'])
 def update_ropa():
+    
     id=request.form['id_ropa']
     cantidad=request.form['cantidad']
     mydata.update_ropa(id,cantidad)
@@ -304,31 +340,41 @@ def update_ropa():
 #rutas de la tabla venta
 @app.route("/newvent", methods=['POST'])
 def insert_venta():
-    total=request.form['total']
-    fecha=date.today()
-    hora=datetime.now()
-    data=mydata.insert_venta(fecha,hora.time(),total)
-    data=mydata.select_venta(data)
+    a=auth_in()
+    if a==True:
+        total=request.form['total']
+        fecha=date.today()
+        hora=datetime.now()
+        data=mydata.insert_venta(fecha,hora.time(),total)
+        data=mydata.select_venta(data)
 
-    return jsonify(data)
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
 
 @app.route("/list_fecha", methods=['POST'])
 def select_venta_fechas():
-    fecha1=request.form['fecha1']
-    fecha2=request.form['fecha2']
-    data=mydata.select_venta_fechas(fecha1,fecha2)
+    a=auth_in()
+    if a==True:
+        fecha1=request.form['fecha1']
+        fecha2=request.form['fecha2']
+        data=mydata.select_venta_fechas(fecha1,fecha2)
 
-    return jsonify(data)
-
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
 @app.route("/list_hora", methods=['POST'])
 def select_venta_hora():
-    fecha1=request.form['fecha1']
-    hora1=request.form['hora1']
-    hora2=request.form['hora2']
-    data=mydata.select_venta_hora(fecha1,hora1,hora2)
+    a=auth_in()
+    if a==True:
+        fecha1=request.form['fecha1']
+        hora1=request.form['hora1']
+        hora2=request.form['hora2']
+        data=mydata.select_venta_hora(fecha1,hora1,hora2)
 
-    return jsonify(data)
-
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
 @app.route("/list_venta")
 def select_venta():
     data=mydata.select_venta(1)
@@ -338,14 +384,18 @@ def select_venta():
 #rutas del tabla tbl_venta_ropa
 @app.route("/newproduct", methods=['POST'])
 def insert_product_venta():
-    id_v=request.form['id_venta']
-    id_r=request.form['id_ropa']
-    cantidad=request.form['cantidad']
-    monto=request.form['monto']
-    data=mydata.insert_producto_venta(id_v,id_r,cantidad,monto)
-    data=mydata.select_venta_ropa(data)
+    a=auth_in()
+    if a==True:
+        id_v=request.form['id_venta']
+        id_r=request.form['id_ropa']
+        cantidad=request.form['cantidad']
+        monto=request.form['monto']
+        data=mydata.insert_producto_venta(id_v,id_r,cantidad,monto)
+        data=mydata.select_venta_ropa(data)
 
-    return jsonify(data)
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
 
 @app.route("/list_product")
 def select_product_venta():
@@ -355,12 +405,16 @@ def select_product_venta():
 
 @app.route("/list_product_fecha", methods=['POST'])
 def select_product_fecha():
-    fecha1=request.form['fecha1']
-    fecha2=request.form['fecha2']
-    data=mydata.select_venta_ropa_fecha(fecha1,fecha2)
+    a=auth_in()
+    if a==True:
+        fecha1=request.form['fecha1']
+        fecha2=request.form['fecha2']
+        data=mydata.select_venta_ropa_fecha(fecha1,fecha2)
 
-    return jsonify(data)
-
+        return jsonify(data)
+    else:
+        return jsonify({'Alert':'Invalid Token'})
+        
 app.run()
 
 
